@@ -143,7 +143,7 @@ type State {
 @external(erlang, "Elixir.Gnat", "start_link")
 fn gnat_start_link(
   settings settings: dict.Dict(atom.Atom, dynamic.Dynamic),
-) -> actor.ErlangStartResult
+) -> Result(process.Pid, dynamic.Dynamic)
 
 // Gnat's publish function.
 @external(erlang, "Elixir.Gnat", "pub")
@@ -212,51 +212,52 @@ pub fn connect(host: String, port: Int, opts: List(ConnectionOption)) {
   // Start actor for NATS connection handling.
   // This just starts Gnat's GenServer module linked to
   // the actor process and translates commands.
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      process.trap_exits(True)
+  actor.new_with_initialiser(5000, fn(my_subject) {
+    process.trap_exits(True)
 
-      let selector =
-        process.new_selector()
-        |> process.selecting_trapped_exits(Exited)
+    let selector =
+      process.new_selector()
+      |> process.select_trapped_exits(Exited)
 
-      // Start linked process using Gnat's start_link
-      case gnat_start_link(build_settings(host, port, opts)) {
-        Ok(pid) ->
-          actor.Ready(State(nats: pid, subscribers: dict.new()), selector)
-        Error(_) -> actor.Failed("starting connection failed")
+    // Start linked process using Gnat's start_link
+    case gnat_start_link(build_settings(host, port, opts)) {
+      Ok(pid) -> {
+        actor.initialised(State(nats: pid, subscribers: dict.new()))
+        |> actor.selecting(selector)
+        |> actor.returning(my_subject)
+        |> Ok
       }
-    },
-    init_timeout: 5000,
-    loop: handle_command,
-  ))
+      Error(_) -> Error("starting connection failed")
+    }
+  })
+  |> actor.on_message(handle_command)
+  |> actor.start
 }
 
 // Runs for every command received.
 //
-fn handle_command(message: ConnectionMessage, state: State) {
+fn handle_command(state: State, message: ConnectionMessage) {
   case message {
     Exited(em) ->
       case em.pid == state.nats {
         // Exited process is Gnat and we can't recover from this
-        True -> actor.Stop(em.reason)
+        True -> actor.stop()
         // Exited process is something else so we check if it's
         // in the map of subscribers and unsubscribe it.
         False ->
           case dict.get(state.subscribers, em.pid) {
             Ok(sid) -> {
               gnat_unsub(state.nats, sid, [])
-              actor.Continue(
+              actor.continue(
                 State(
                   ..state,
                   subscribers: dict.delete(state.subscribers, em.pid),
                 ),
-                None,
               )
             }
             Error(Nil) -> {
               io.println("exited process not found in map of subscribers")
-              actor.Continue(state, None)
+              actor.continue(state)
             }
           }
       }
@@ -280,7 +281,7 @@ fn handle_server_info(from, state: State) {
   |> result.map_error(fn(_) { Unexpected })
   |> process.send(from, _)
 
-  actor.Continue(state, None)
+  actor.continue(state)
 }
 
 // Handles a single active subscriptions command.
@@ -290,7 +291,7 @@ fn handle_active_subscriptions(from, state: State) {
   |> result.map_error(fn(_) { Unexpected })
   |> process.send(from, _)
 
-  actor.Continue(state, None)
+  actor.continue(state)
 }
 
 // Handles a single publish command.
@@ -309,7 +310,7 @@ fn handle_publish(
     "ok" -> process.send(from, Ok(Nil))
     _ -> process.send(from, Error(Unexpected))
   }
-  actor.Continue(state, None)
+  actor.continue(state)
 }
 
 // Handles a single request command.
@@ -323,7 +324,7 @@ fn handle_request(
   state: State,
 ) {
   let opts = [
-    #(atom.create_from_string("receive_timeout"), dynamic.int(timeout)),
+    #(atom.create("receive_timeout"), dynamic.int(timeout)),
   ]
 
   // In order to not block the connection actor we return a function
@@ -344,7 +345,7 @@ fn handle_request(
 
   process.send(from, req_func)
 
-  actor.Continue(state, None)
+  actor.continue(state)
 }
 
 // Handles a single unsubscribe command.
@@ -357,7 +358,7 @@ fn handle_unsubscribe(from, sid, state: State) {
     "ok" -> process.send(from, Ok(Nil))
     _ -> process.send(from, Error(Unexpected))
   }
-  actor.Continue(state, None)
+  actor.continue(state)
 }
 
 // Handles a single subscribe command.
@@ -375,25 +376,24 @@ fn handle_subscribe(
         True -> {
           process.send(from, Ok(sid))
 
-          actor.Continue(
+          actor.continue(
             State(
               ..state,
               subscribers: dict.insert(state.subscribers, subscriber, sid),
             ),
-            None,
           )
         }
         False -> {
           // TODO: unsub
           process.send(from, Error(Unexpected))
 
-          actor.Continue(state, None)
+          actor.continue(state)
         }
       }
     Error(_) -> {
       process.send(from, Error(Unexpected))
 
-      actor.Continue(state, None)
+      actor.continue(state)
     }
   }
 }
@@ -417,7 +417,7 @@ pub fn publish(
   body: String,
   opts: List(PublishOption),
 ) {
-  process.call(conn, Publish(_, topic, body, opts), 5000)
+  process.call(conn, 5000, Publish(_, topic, body, opts))
 }
 
 /// Publishes a single message to NATS using the data from a provided `Message`
@@ -450,7 +450,7 @@ pub fn request(
   // This is done in order to not block the entire connection actor when waiting
   // for a response.
   let make_request =
-    process.call(conn, Request(_, topic, body, opts, timeout), 1000)
+    process.call(conn, 1000, Request(_, topic, body, opts, timeout))
 
   // Call the request function returned by the connection actor.
   make_request()
@@ -512,34 +512,16 @@ pub fn subscribe(
 ) {
   case subscription.start_subscriber(conn, subscriber, subscription_mapper) {
     Ok(sub) -> {
-      case
-        process.call(
-          conn,
-          Subscribe(
-            _,
-            sub
-              |> process.subject_owner,
-            topic,
-            opts,
-          ),
-          5000,
-        )
-      {
+      case process.call(conn, 5000, Subscribe(_, sub.pid, topic, opts)) {
         Ok(sid) -> {
           // unlink from subscription process
-          process.unlink(
-            sub
-            |> process.subject_owner,
-          )
+          process.unlink(sub.pid)
 
           Ok(sid)
         }
         Error(err) -> {
           // stop subscription actor
-          process.kill(
-            sub
-            |> process.subject_owner,
-          )
+          process.kill(sub.pid)
 
           Error(err)
         }
@@ -552,7 +534,7 @@ pub fn subscribe(
 /// Unsubscribe from a subscription by providing the subscription ID.
 ///
 pub fn unsubscribe(conn: Connection, sid: Int) {
-  process.call(conn, Unsubscribe(_, sid), 5000)
+  process.call(conn, 5000, Unsubscribe(_, sid))
 }
 
 //             //
@@ -562,7 +544,7 @@ pub fn unsubscribe(conn: Connection, sid: Int) {
 /// Returns server info provided by the connected NATS server.
 ///
 pub fn server_info(conn: Connection) {
-  process.call(conn, GetServerInfo, 5000)
+  process.call(conn, 5000, GetServerInfo)
 }
 
 //                      //
@@ -572,7 +554,7 @@ pub fn server_info(conn: Connection) {
 /// Returns the number of active subscriptions for the connection.
 ///
 pub fn active_subscriptions(conn: Connection) {
-  process.call(conn, GetActiveSubscriptions, 5000)
+  process.call(conn, 5000, GetActiveSubscriptions)
 }
 
 //           //
@@ -602,7 +584,7 @@ fn build_settings(
     "no_responders", "username", "password", "token", "nkey_seed", "jwt",
   ])
   |> dict.to_list
-  |> list.map(fn(i) { #(atom.create_from_string(i.0), i.1) })
+  |> list.map(fn(i) { #(atom.create(i.0), i.1) })
   |> dict.from_list
 }
 
@@ -644,7 +626,7 @@ fn apply_conn_option(
 fn add_ssl_opts(prev: dict.Dict(String, dynamic.Dynamic)) {
   dict.take(prev, ["cacertfile", "certfile", "keyfile"])
   |> dict.to_list
-  |> list.map(fn(o) { #(dynamic.from(atom.create_from_string(o.0)), o.1) })
+  |> list.map(fn(o) { #(atom.to_dynamic(atom.create(o.0)), o.1) })
   |> dynamic.properties
   |> dict.insert(prev, "ssl_opts", _)
 }
@@ -654,10 +636,10 @@ fn add_ssl_opts(prev: dict.Dict(String, dynamic.Dynamic)) {
 // Decodes a message map returned by NATS
 fn decode_msg(data: dynamic.Dynamic) {
   let decoder = {
-    use topic <- decode.field(atom.create_from_string("topic"), decode.string)
+    use topic <- decode.field(atom.create("topic"), decode.string)
     use headers <- decode_headers
     use reply_to <- decode_reply_to
-    use body <- decode.field(atom.create_from_string("body"), decode.string)
+    use body <- decode.field(atom.create("body"), decode.string)
 
     decode.success(Message(topic, headers, reply_to, body))
   }
@@ -670,7 +652,7 @@ fn decode_msg(data: dynamic.Dynamic) {
 // an empty map is returned.
 fn decode_headers(next) {
   decode.optional_field(
-    atom.create_from_string("headers"),
+    atom.create("headers"),
     dict.new(),
     decode.dict(decode.string, decode.string),
     next,
@@ -681,7 +663,7 @@ fn decode_headers(next) {
 // If reply_to is `Nil` None is returned.
 fn decode_reply_to(next) {
   decode.optional_field(
-    atom.create_from_string("reply_to"),
+    atom.create("reply_to"),
     None,
     decode.optional(decode.string),
     next,

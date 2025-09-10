@@ -6,7 +6,8 @@ import gleam/io
 import gleam/result
 
 pub fn main() {
-  use conn <- result.then(glats.connect("localhost", 4222, []))
+  use started <- result.try(glats.connect("localhost", 4222, []))
+  let conn = started.data
 
   let assert Ok(created) =
     stream.create(conn, "mystream", ["orders.>", "items.>"], [

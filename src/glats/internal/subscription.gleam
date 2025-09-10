@@ -39,28 +39,32 @@ pub fn start_subscriber(
   receiver: process.Subject(b),
   mapper: MapperFunc(a, b),
 ) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      // Monitor subscriber process.
-      let monitor =
-        process.monitor_process(
-          receiver
-          |> process.subject_owner,
-        )
+  actor.new_with_initialiser(1000, fn(my_subject) {
+    // Monitor subscriber process.
+    let _monitor =
+      process.monitor(
+        receiver
+        |> process.subject_owner
+        |> result.unwrap(process.self()),
+      )
 
-      let selector =
-        process.new_selector()
-        |> process.selecting_process_down(monitor, fn(_) { SubscriberExited })
-        |> process.selecting_record2(
-          atom.create_from_string("msg"),
-          map_gnat_message,
-        )
+    let selector =
+      process.new_selector()
+      |> process.select_monitors(fn(down) {
+        case down {
+          process.ProcessDown(_, _, _) -> SubscriberExited
+          _ -> SubscriberExited
+        }
+      })
+      |> process.select_other(fn(data) { map_gnat_message(data) })
 
-      actor.Ready(State(conn, receiver, mapper), selector)
-    },
-    init_timeout: 1000,
-    loop: loop,
-  ))
+    actor.initialised(State(conn, receiver, mapper))
+    |> actor.selecting(selector)
+    |> actor.returning(my_subject)
+    |> Ok
+  })
+  |> actor.on_message(loop)
+  |> actor.start
 }
 
 fn map_gnat_message(data: dynamic.Dynamic) -> Message {
@@ -70,19 +74,19 @@ fn map_gnat_message(data: dynamic.Dynamic) -> Message {
   |> result.unwrap(DecodeError(data))
 }
 
-fn loop(message: Message, state: State(a, b)) {
+fn loop(state: State(a, b), message: Message) {
   case message {
     ReceivedMessage(raw_msg) -> {
       actor.send(state.receiver, state.mapper(state.conn, raw_msg))
-      actor.Continue(state, None)
+      actor.continue(state)
     }
     DecodeError(data) -> {
       io.println("failed to decode: " <> string.inspect(data))
-      actor.Continue(state, None)
+      actor.continue(state)
     }
     SubscriberExited -> {
       io.println("subscriber exited")
-      actor.Stop(process.Normal)
+      actor.stop()
     }
   }
 }
@@ -94,10 +98,10 @@ pub fn decode_raw_msg(data: dynamic.Dynamic) {
   let decoder = {
     use sid <- decode_sid
     use status <- decode_status
-    use topic <- decode.field(atom.create_from_string("topic"), decode.string)
+    use topic <- decode.field(atom.create("topic"), decode.string)
     use headers <- decode_headers
     use reply_to <- decode_reply_to
-    use body <- decode.field(atom.create_from_string("body"), decode.string)
+    use body <- decode.field(atom.create("body"), decode.string)
 
     decode.success(RawMessage(sid, status, topic, headers, reply_to, body))
   }
@@ -107,13 +111,13 @@ pub fn decode_raw_msg(data: dynamic.Dynamic) {
 
 // Decodes sid with default value of -1 if not found.
 fn decode_sid(next) {
-  decode.optional_field(atom.create_from_string("sid"), -1, decode.int, next)
+  decode.optional_field(atom.create("sid"), -1, decode.int, next)
 }
 
 // Decodes status.
 fn decode_status(next) {
   decode.optional_field(
-    atom.create_from_string("status"),
+    atom.create("status"),
     None,
     decode.optional(decode.int),
     next,
@@ -125,7 +129,7 @@ fn decode_status(next) {
 // an empty map is returned.
 fn decode_headers(next) {
   decode.optional_field(
-    atom.create_from_string("headers"),
+    atom.create("headers"),
     dict.new(),
     decode.dict(decode.string, decode.string),
     next,
@@ -136,7 +140,7 @@ fn decode_headers(next) {
 // If reply_to is `Nil` None is returned.
 fn decode_reply_to(next) {
   decode.optional_field(
-    atom.create_from_string("reply_to"),
+    atom.create("reply_to"),
     None,
     decode.optional(decode.string),
     next,

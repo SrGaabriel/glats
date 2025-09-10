@@ -95,9 +95,8 @@
 import glats
 import glats/jetstream
 import glats/jetstream/consumer
-import gleam/erlang/process.{Abnormal}
-import gleam/function.{identity}
-import gleam/option.{None, Some}
+import gleam/erlang/process
+import gleam/option.{Some}
 import gleam/otp/actor
 import gleam/string
 
@@ -144,44 +143,43 @@ pub fn handle_pull_consumer(
   handler: SubscriptionHandler(a),
   opts: List(consumer.SubscriptionOption),
 ) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      let subject = process.new_subject()
-      let selector =
-        process.new_selector()
-        |> process.selecting(subject, identity)
+  actor.new_with_initialiser(5000, fn(my_subject) {
+    let subject = process.new_subject()
+    let selector =
+      process.new_selector()
+      |> process.select(subject)
 
-      case consumer.subscribe(conn, subject, topic, opts) {
-        Ok(sub) -> {
-          // Request initial batch
-          case
-            consumer.request_batch(sub, [
-              consumer.Batch(batch_size),
-              consumer.Expires(expires * 1_000_000),
-            ])
-          {
-            Ok(Nil) ->
-              actor.Ready(
-                PullHandlerState(
-                  conn,
-                  sub,
-                  batch_size,
-                  batch_size,
-                  handler,
-                  initial_state,
-                ),
-                selector,
-              )
-            Error(err) -> actor.Failed(string.inspect(err))
+    case consumer.subscribe(conn, subject, topic, opts) {
+      Ok(sub) -> {
+        // Request initial batch
+        case
+          consumer.request_batch(sub, [
+            consumer.Batch(batch_size),
+            consumer.Expires(expires * 1_000_000),
+          ])
+        {
+          Ok(Nil) -> {
+            actor.initialised(PullHandlerState(
+              conn,
+              sub,
+              batch_size,
+              batch_size,
+              handler,
+              initial_state,
+            ))
+            |> actor.selecting(selector)
+            |> actor.returning(my_subject)
+            |> Ok
           }
+          Error(err) -> Error(string.inspect(err))
         }
-
-        Error(err) -> actor.Failed(string.inspect(err))
       }
-    },
-    init_timeout: 5000,
-    loop: pull_loop,
-  ))
+
+      Error(err) -> Error(string.inspect(err))
+    }
+  })
+  |> actor.on_message(pull_loop)
+  |> actor.start
 }
 
 fn request_more(state: PullHandlerState(a)) {
@@ -192,12 +190,12 @@ fn request_more(state: PullHandlerState(a)) {
     ])
   {
     Ok(Nil) ->
-      actor.Continue(PullHandlerState(..state, pending: state.batch_size), None)
-    Error(err) -> actor.Stop(Abnormal(string.inspect(err)))
+      actor.continue(PullHandlerState(..state, pending: state.batch_size))
+    Error(err) -> actor.stop_abnormal(string.inspect(err))
   }
 }
 
-fn pull_loop(message: glats.SubscriptionMessage, state: PullHandlerState(a)) {
+fn pull_loop(state: PullHandlerState(a), message: glats.SubscriptionMessage) {
   case message {
     // Request expired.
     glats.ReceivedMessage(status: Some(408), ..) -> request_more(state)
@@ -211,15 +209,15 @@ fn pull_loop(message: glats.SubscriptionMessage, state: PullHandlerState(a)) {
 fn handle_pull_message(message: glats.Message, state: PullHandlerState(a)) {
   let inner = case state.handler(message, state.inner_state) {
     Ack(inner) -> {
-      jetstream.ack(state.conn, message)
+      let _ = jetstream.ack(state.conn, message)
       inner
     }
     Nack(inner) -> {
-      jetstream.nack(state.conn, message)
+      let _ = jetstream.nack(state.conn, message)
       inner
     }
     Term(inner) -> {
-      jetstream.term(state.conn, message)
+      let _ = jetstream.term(state.conn, message)
       inner
     }
     NoReply(inner) -> inner
@@ -231,13 +229,12 @@ fn handle_pull_message(message: glats.Message, state: PullHandlerState(a)) {
     True -> request_more(PullHandlerState(..state, inner_state: inner))
     // Decrement the counter
     False ->
-      actor.Continue(
+      actor.continue(
         PullHandlerState(
           ..state,
           pending: state.pending - 1,
           inner_state: inner,
         ),
-        None,
       )
   }
 }

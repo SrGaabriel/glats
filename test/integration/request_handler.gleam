@@ -6,7 +6,8 @@ import gleam/option.{None}
 import gleam/result
 
 pub fn main() {
-  use conn <- result.then(glats.connect("localhost", 4222, []))
+  use started <- result.try(glats.connect("localhost", 4222, []))
+  let conn = started.data
 
   // Start a request handler actor that will call `ping_pong_handler`
   // for every request received from NATS topic "do.ping".

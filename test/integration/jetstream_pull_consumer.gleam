@@ -5,10 +5,10 @@ import glats/jetstream/consumer.{
   NoWait, With,
 }
 import glats/jetstream/stream
-import gleam/erlang/process.{Abnormal}
+import gleam/erlang/process
 import gleam/io
 import gleam/option.{Some}
-import gleam/otp/actor.{InitFailed}
+import gleam/otp/actor
 import gleam/result
 import gleam/string
 
@@ -19,7 +19,8 @@ type State {
 }
 
 pub fn main() {
-  use conn <- result.then(glats.connect("localhost", 4222, []))
+  use started <- result.try(glats.connect("localhost", 4222, []))
+  let conn = started.data
 
   // Create a stream
   let assert Ok(stream) =
@@ -51,7 +52,7 @@ pub fn main() {
     Error(err) -> {
       io.println("got error: " <> string.inspect(err))
 
-      Error(InitFailed(Abnormal(string.inspect(err))))
+      Error(actor.InitFailed(string.inspect(err)))
     }
   }
 }

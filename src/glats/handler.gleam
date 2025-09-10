@@ -110,27 +110,29 @@ pub fn handle_request(
   opts: List(glats.SubscribeOption),
   handler: RequestHandler(a),
 ) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      let subscriber = process.new_subject()
-      let selector =
-        process.new_selector()
-        |> process.selecting(subscriber, fn(msg) { msg })
+  actor.new_with_initialiser(5000, fn(my_subject) {
+    let subscriber = process.new_subject()
+    let selector =
+      process.new_selector()
+      |> process.select(subscriber)
 
-      case glats.subscribe(conn, subscriber, topic, opts) {
-        Ok(sid) ->
-          actor.Ready(RequestHandlerState(conn, sid, handler, state), selector)
-        Error(err) -> actor.Failed(string.inspect(err))
+    case glats.subscribe(conn, subscriber, topic, opts) {
+      Ok(sid) -> {
+        actor.initialised(RequestHandlerState(conn, sid, handler, state))
+        |> actor.selecting(selector)
+        |> actor.returning(my_subject)
+        |> Ok
       }
-    },
-    init_timeout: 5000,
-    loop: request_handler_loop,
-  ))
+      Error(err) -> Error(string.inspect(err))
+    }
+  })
+  |> actor.on_message(request_handler_loop)
+  |> actor.start
 }
 
 fn request_handler_loop(
-  message: glats.SubscriptionMessage,
   state: RequestHandlerState(a),
+  message: glats.SubscriptionMessage,
 ) {
   case message {
     glats.ReceivedMessage(conn, _, _, msg) ->
@@ -162,17 +164,14 @@ fn request_handler_msg(
 
           case pub_res {
             Ok(Nil) ->
-              actor.Continue(
-                RequestHandlerState(..state, inner: new_inner),
-                None,
-              )
-            Error(err) -> actor.Stop(process.Abnormal(string.inspect(err)))
+              actor.continue(RequestHandlerState(..state, inner: new_inner))
+            Error(err) -> actor.stop_abnormal(string.inspect(err))
           }
         }
 
-        Stop(reason) -> actor.Stop(reason)
+        Stop(_reason) -> actor.stop()
       }
     }
-    None -> actor.Continue(state, None)
+    None -> actor.continue(state)
   }
 }
