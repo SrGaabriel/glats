@@ -212,6 +212,7 @@ pub fn connect(host: String, port: Int, opts: List(ConnectionOption)) {
   // Start actor for NATS connection handling.
   // This just starts Gnat's GenServer module linked to
   // the actor process and translates commands.
+  io.println("Starting connection actor...")
   actor.new_with_initialiser(5000, fn(my_subject) {
     process.trap_exits(True)
 
