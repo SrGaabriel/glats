@@ -548,8 +548,8 @@ pub fn subscribe(
   topic: String,
   opts: List(SubscriptionOption),
 ) {
-  use stream <- result.then(find_stream(conn, topic, opts))
-  use consumer <- result.then(find_consumer(conn, stream, topic, opts))
+  use stream <- result.try(find_stream(conn, topic, opts))
+  use consumer <- result.try(find_consumer(conn, stream, topic, opts))
 
   case consumer.config.deliver_subject {
     None -> pull_subscribe(conn, subscriber, stream, consumer.name)

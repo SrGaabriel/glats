@@ -215,13 +215,14 @@ pub fn connect(host: String, port: Int, opts: List(ConnectionOption)) {
   actor.new_with_initialiser(5000, fn(my_subject) {
     process.trap_exits(True)
 
-    let selector =
-      process.new_selector()
-      |> process.select_trapped_exits(Exited)
-
     // Start linked process using Gnat's start_link
     case gnat_start_link(build_settings(host, port, opts)) {
       Ok(pid) -> {
+        let selector =
+          process.new_selector()
+          |> process.select_trapped_exits(Exited)
+          |> process.select(my_subject)
+
         actor.initialised(State(nats: pid, subscribers: dict.new()))
         |> actor.selecting(selector)
         |> actor.returning(my_subject)
@@ -636,10 +637,10 @@ fn add_ssl_opts(prev: dict.Dict(String, dynamic.Dynamic)) {
 // Decodes a message map returned by NATS
 fn decode_msg(data: dynamic.Dynamic) {
   let decoder = {
-    use topic <- decode.field(atom.create("topic"), decode.string)
+    use topic <- decode.field(atom.create("Topic"), decode.string)
     use headers <- decode_headers
     use reply_to <- decode_reply_to
-    use body <- decode.field(atom.create("body"), decode.string)
+    use body <- decode.field(atom.create("Body"), decode.string)
 
     decode.success(Message(topic, headers, reply_to, body))
   }
@@ -652,7 +653,7 @@ fn decode_msg(data: dynamic.Dynamic) {
 // an empty map is returned.
 fn decode_headers(next) {
   decode.optional_field(
-    atom.create("headers"),
+    atom.create("Headers"),
     dict.new(),
     decode.dict(decode.string, decode.string),
     next,
@@ -663,7 +664,7 @@ fn decode_headers(next) {
 // If reply_to is `Nil` None is returned.
 fn decode_reply_to(next) {
   decode.optional_field(
-    atom.create("reply_to"),
+    atom.create("ReplyTo"),
     None,
     decode.optional(decode.string),
     next,

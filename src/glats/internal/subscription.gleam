@@ -40,7 +40,6 @@ pub fn start_subscriber(
   mapper: MapperFunc(a, b),
 ) {
   actor.new_with_initialiser(1000, fn(my_subject) {
-    // Monitor subscriber process.
     let _monitor =
       process.monitor(
         receiver
@@ -68,11 +67,22 @@ pub fn start_subscriber(
 }
 
 fn map_gnat_message(data: dynamic.Dynamic) -> Message {
-  data
-  |> decode_raw_msg
-  |> result.map(ReceivedMessage)
-  |> result.unwrap(DecodeError(data))
+  case decode_message_ffi(data) {
+    Ok(raw_msg) -> {
+      ReceivedMessage(raw_msg)
+    }
+    Error(error) -> {
+      io.println("❌ FFI decode failed: " <> string.inspect(error))
+      DecodeError(data)
+    }
+  }
 }
+
+// Direct FFI decoding of the entire message
+@external(erlang, "msg_extractor", "decode_message")
+fn decode_message_ffi(
+  data: dynamic.Dynamic,
+) -> Result(RawMessage, dynamic.Dynamic)
 
 fn loop(state: State(a, b), message: Message) {
   case message {
@@ -98,26 +108,38 @@ pub fn decode_raw_msg(data: dynamic.Dynamic) {
   let decoder = {
     use sid <- decode_sid
     use status <- decode_status
-    use topic <- decode.field(atom.create("topic"), decode.string)
+    use topic <- decode.field(atom.create("Topic"), decode.string)
     use headers <- decode_headers
     use reply_to <- decode_reply_to
-    use body <- decode.field(atom.create("body"), decode.string)
-
+    use body <- decode.field(atom.create("Body"), decode.string)
+    use _gnat <- decode.optional_field(
+      atom.create("Gnat"),
+      None,
+      decode.optional(decode.string),
+    )
     decode.success(RawMessage(sid, status, topic, headers, reply_to, body))
   }
 
-  decode.run(data, decoder)
+  case decode.run(data, decoder) {
+    Ok(result) -> {
+      Ok(result)
+    }
+    Error(errors) -> {
+      io.println(string.inspect(errors))
+      Error(errors)
+    }
+  }
 }
 
 // Decodes sid with default value of -1 if not found.
 fn decode_sid(next) {
-  decode.optional_field(atom.create("sid"), -1, decode.int, next)
+  decode.optional_field(atom.create("Sid"), -1, decode.int, next)
 }
 
 // Decodes status.
 fn decode_status(next) {
   decode.optional_field(
-    atom.create("status"),
+    atom.create("Status"),
     None,
     decode.optional(decode.int),
     next,
@@ -129,7 +151,7 @@ fn decode_status(next) {
 // an empty map is returned.
 fn decode_headers(next) {
   decode.optional_field(
-    atom.create("headers"),
+    atom.create("Headers"),
     dict.new(),
     decode.dict(decode.string, decode.string),
     next,
@@ -140,7 +162,7 @@ fn decode_headers(next) {
 // If reply_to is `Nil` None is returned.
 fn decode_reply_to(next) {
   decode.optional_field(
-    atom.create("reply_to"),
+    atom.create("ReplyTo"),
     None,
     decode.optional(decode.string),
     next,

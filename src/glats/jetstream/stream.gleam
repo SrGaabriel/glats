@@ -3,7 +3,6 @@ import glats/internal/js
 import glats/jetstream
 import gleam/bit_array
 import gleam/dict
-import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
@@ -476,7 +475,7 @@ pub fn get_message(conn: glats.Connection, stream: String, method: AccessMethod)
   case glats.request(conn, topic, body, [], 1000) {
     Ok(msg) ->
       decode_raw_message(msg.body)
-      |> result.then(fn(d) {
+      |> result.try(fn(d) {
         raw_to_stream_message(d)
         |> result.map_error(fn(_) { jetstream.DecodeError(msg.body) })
       })
@@ -522,7 +521,7 @@ fn decode_raw_message(body: String) {
 // Map a RawStreamMessage to a StreamMessage.
 //
 fn raw_to_stream_message(msg: RawStreamMessage) {
-  use body <- result.then(
+  use body <- result.try(
     bit_array.base64_decode(msg.data)
     |> result.map(bit_array.to_string),
   )

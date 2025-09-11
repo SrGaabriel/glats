@@ -27,7 +27,7 @@ pub fn map_code_to_error(data: #(Int, String)) -> jetstream.JetstreamError {
 }
 
 pub fn decode_b64_headers(hdrs: String) {
-  use data <- result.then(
+  use data <- result.try(
     base64_decode(hdrs)
     |> result.map(bit_array.to_string)
     |> result.flatten,
