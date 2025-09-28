@@ -212,7 +212,6 @@ pub fn connect(host: String, port: Int, opts: List(ConnectionOption)) {
   // Start actor for NATS connection handling.
   // This just starts Gnat's GenServer module linked to
   // the actor process and translates commands.
-  io.println("Starting connection actor...")
   actor.new_with_initialiser(5000, fn(my_subject) {
     process.trap_exits(True)
 
@@ -333,9 +332,12 @@ fn handle_request(
   // that will make the request.
   let req_func = fn() {
     case gnat_request(state.nats, topic, body, opts) {
-      Ok(msg) ->
-        decode_msg(msg)
-        |> result.map_error(fn(_) { Unexpected })
+      Ok(msg) -> {
+        case decode_msg(msg) {
+          Ok(decoded) -> Ok(decoded)
+          Error(_decode_error) -> Error(Unexpected)
+        }
+      }
       Error(err) ->
         case atom.to_string(err) {
           "timeout" -> Error(Timeout)
@@ -635,39 +637,40 @@ fn add_ssl_opts(prev: dict.Dict(String, dynamic.Dynamic)) {
 
 // Decode Gnat message
 
-// Decodes a message map returned by NATS
-fn decode_msg(data: dynamic.Dynamic) {
-  let decoder = {
-    use topic <- decode.field(atom.create("Topic"), decode.string)
-    use headers <- decode_headers
-    use reply_to <- decode_reply_to
-    use body <- decode.field(atom.create("Body"), decode.string)
+@external(erlang, "msg_extractor", "decode_request_message")
+fn decode_request_message_ffi(
+  data: dynamic.Dynamic,
+) -> Result(dynamic.Dynamic, dynamic.Dynamic)
 
-    decode.success(Message(topic, headers, reply_to, body))
+fn decode_msg(
+  data: dynamic.Dynamic,
+) -> Result(Message, List(decode.DecodeError)) {
+  case decode_request_message_ffi(data) {
+    Ok(ffi_result) -> {
+      let decoder = {
+        use topic <- decode.field(atom.create("topic"), decode.string)
+        use body <- decode.field(atom.create("body"), decode.string)
+        use headers <- decode.field(
+          atom.create("headers"),
+          decode.dict(decode.string, decode.string),
+        )
+        use reply_to_raw <- decode.field(
+          atom.create("reply_to"),
+          decode.dynamic,
+        )
+
+        let reply_to = case decode.run(reply_to_raw, decode.string) {
+          Ok(reply_str) -> Some(reply_str)
+          Error(_) -> None
+        }
+
+        decode.success(Message(topic, headers, reply_to, body))
+      }
+
+      decode.run(ffi_result, decoder)
+    }
+    Error(_ffi_error) -> {
+      Error([decode.DecodeError("FFI decode failed", "Message", [])])
+    }
   }
-
-  decode.run(data, decoder)
-}
-
-// Decodes headers from a map with message data.
-// If the key is absent (which happens when no headers are sent)
-// an empty map is returned.
-fn decode_headers(next) {
-  decode.optional_field(
-    atom.create("Headers"),
-    dict.new(),
-    decode.dict(decode.string, decode.string),
-    next,
-  )
-}
-
-// Decodes reply_to from a map with message data into option.Option(String).
-// If reply_to is `Nil` None is returned.
-fn decode_reply_to(next) {
-  decode.optional_field(
-    atom.create("ReplyTo"),
-    None,
-    decode.optional(decode.string),
-    next,
-  )
 }
