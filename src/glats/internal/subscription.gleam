@@ -95,7 +95,6 @@ fn loop(state: State(a, b), message: Message) {
       actor.continue(state)
     }
     SubscriberExited -> {
-      io.println("subscriber exited")
       actor.stop()
     }
   }
